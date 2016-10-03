@@ -274,7 +274,9 @@ def scan_folder(server, foldername, nospinner, batch_size=HEADER_BATCH_SIZE):
         raise SkipFolderException("FETCH %s failed: %s" % (num, data))
 
       data = parse_bulk_fetch(data)
-      data = [(d[0],d[1].strip()) for d in data]
+      data = [(d[0],
+               d[1].splitlines()[0])
+               for d in data]
       
       for num,header in data:
         # remove newlines inside Message-Id (a dumb Exchange trait)
