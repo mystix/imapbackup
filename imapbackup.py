@@ -112,10 +112,9 @@ def write_message(mbox, msg_id, text, config):
   mbox.write(buf)
 
   text = text.strip().replace('\r','')  
-  if config['thunderbird']:
-    # This avoids Thunderbird mistaking a line starting "From  " as the start
-    # of a new message. _Might_ also apply to other mail lients - unknown
-    text = text.replace("\nFrom ", "\n From ")
+  # Escape lines starting with "From", per https://en.wikipedia.org/wiki/Mbox spec
+  # TODO: this should probably move to using the Python mbox library directly for safe, portable writing
+  text = text.replace("\nFrom ", "\n From ")
   mbox.write(text)
   mbox.write('\n\n')
 
