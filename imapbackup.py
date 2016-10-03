@@ -213,11 +213,20 @@ def scan_file(filename, compress, overwrite, nospinner):
   # each message
   i = 0
   for message in mailbox.PortableUnixMailbox(mbox):
-    # assert(message)
+    if not message.headers:
+      # Message is entirely blank. Warn and advance.
+      # This probably means we wrote something questionable to the mbox file,
+      # like an unescaped "From" line in the body of a message.
+      print
+      print "WARNING: Found empty message #%d in mbox %s" % (i, filename)
+      continue
+
     header = ''
     # We assume all messages on disk have message-ids
     try:
       header =  ''.join(message.getfirstmatchingheader('message-id'))
+      if not header:
+        raise KeyError
     except KeyError:
       # No message ID was found. Warn the user and move on
       print
