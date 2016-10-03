@@ -97,8 +97,36 @@ BLANKS_RE = re.compile(r'\s+', re.MULTILINE)
  
 # Constants
 UUID = '19AF1258-1AAF-44EF-9D9A-731079D6FAD7' # Used to generate Message-Ids
- 
-def download_messages(server, filename, messages, config):
+HEADER_BATCH_SIZE = 500 # the number of headers to try to fetch at once during scan_folder
+DOWNLOAD_BATCH_SIZE = 25 # the number of messages to try to fetch at once during download_messages
+
+def write_message(mbox, msg_id, text, config):
+  """Write message to mbox file"""
+  # This "From" and the terminating newline below delimit messages
+  # in mbox files
+  buf = "From nobody %s\n" % time.strftime('%a %m %d %H:%M:%S %Y') 
+  # If this is one of our synthesised Message-IDs, insert it before
+  # the other headers
+  if UUID in msg_id:
+    buf = buf + "Message-Id: %s\n" % msg_id
+  mbox.write(buf)
+
+  text = text.strip().replace('\r','')  
+  if config['thunderbird']:
+    # This avoids Thunderbird mistaking a line starting "From  " as the start
+    # of a new message. _Might_ also apply to other mail lients - unknown
+    text = text.replace("\nFrom ", "\n From ")
+  mbox.write(text)
+  mbox.write('\n\n')
+
+  size = len(text)
+  return size
+
+def parse_bulk_fetch(data):
+  """Clean up raw bulk imaplib server.fetch response into (message-num, response-body) tuples"""
+  return [(int(d[0].split()[0]), d[1]) for d in data if isinstance(d, tuple)]
+
+def download_messages(server, filename, messages, config, batch_size=DOWNLOAD_BATCH_SIZE):
   """Download messages from folder and append to mailbox"""
  
   if config['overwrite']:
@@ -129,32 +157,26 @@ def download_messages(server, filename, messages, config):
                     config['nospinner'])
   total = biggest = 0
  
+  # TODO: Excess complexity is introduced several places here to match the exact order of the un-batched code, for validation
+  message_ids = {v: k for k, v in messages.iteritems()}
   # each new message
-  for msg_id in messages.keys():
-    # This "From" and the terminating newline below delimit messages
-    # in mbox files
-    buf = "From nobody %s\n" % time.strftime('%a %m %d %H:%M:%S %Y') 
-    # If this is one of our synthesised Message-IDs, insert it before
-    # the other headers
-    if UUID in msg_id:
-      buf = buf + "Message-Id: %s\n" % msg_id
-    mbox.write(buf)
- 
-    # fetch message
-    typ, data = server.fetch(messages[msg_id], "RFC822")
+  msg_ids = messages.keys()
+  while msg_ids:
+    batch_idxs = [messages[msg_id] for msg_id in msg_ids[:batch_size]]
+    # fetch messages
+    typ, data = server.fetch(','.join([str(idx) for idx in batch_idxs]), "RFC822")
     assert('OK' == typ)
-    text = data[0][1].strip().replace('\r','')  
-    if config['thunderbird']:
-      # This avoids Thunderbird mistaking a line starting "From  " as the start
-      # of a new message. _Might_ also apply to other mail lients - unknown
-      text = text.replace("\nFrom ", "\n From ")
-    mbox.write(text)
-    mbox.write('\n\n')
- 
-    size = len(text)
-    biggest = max(size, biggest)
-    total += size
- 
+    data = dict(parse_bulk_fetch(data))
+    
+    for idx in batch_idxs:
+      assert(idx in data)
+      msg_ids.remove(message_ids[idx])
+      msg_id = message_ids[idx]
+      text = data[idx]
+      size = write_message(mbox, msg_id, text, config)
+      biggest = max(size, biggest)
+      total += size
+
     del data
     gc.collect()
     spinner.spin()
@@ -192,6 +214,7 @@ def scan_file(filename, compress, overwrite, nospinner):
   # each message
   i = 0
   for message in mailbox.PortableUnixMailbox(mbox):
+    # assert(message)
     header = ''
     # We assume all messages on disk have message-ids
     try:
@@ -214,6 +237,7 @@ def scan_file(filename, compress, overwrite, nospinner):
       print
       print "WARNING: Message #%d in %s" % (i, filename),
       print "has a malformed Message-Id header."
+      print header
     spinner.spin()
     i = i + 1
  
@@ -223,7 +247,7 @@ def scan_file(filename, compress, overwrite, nospinner):
   print ": %d messages" % (len(messages.keys()))
   return messages
  
-def scan_folder(server, foldername, nospinner):
+def scan_folder(server, foldername, nospinner, batch_size=HEADER_BATCH_SIZE):
   """Gets IDs of messages in the specified folder, returns id:num dict"""
   messages = {}
   spinner = Spinner("Folder %s" % (foldername), nospinner)
@@ -234,30 +258,37 @@ def scan_folder(server, foldername, nospinner):
     num_msgs = int(data[0])
  
     # each message
-    for num in range(1, num_msgs+1):
+    base_num = 1
+    while base_num < num_msgs+1:
       # Retrieve Message-Id, making sure we don't mark all messages as read
-      typ, data = server.fetch(num, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
+      typ, data = server.fetch('%d:%d' % (base_num, base_num+batch_size-1), '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
       if 'OK' != typ:
         raise SkipFolderException("FETCH %s failed: %s" % (num, data))
- 
-      header = data[0][1].strip()
-      # remove newlines inside Message-Id (a dumb Exchange trait)
-      header = BLANKS_RE.sub(' ', header)
-      try:
-        msg_id = MSGID_RE.match(header).group(1) 
-        if msg_id not in messages.keys():
-          # avoid adding dupes
-          messages[msg_id] = num
-      except (IndexError, AttributeError):
-        # Some messages may have no Message-Id, so we'll synthesise one
-        # (this usually happens with Sent, Drafts and .Mac news)
-        typ, data = server.fetch(num, '(BODY[HEADER.FIELDS (FROM TO CC DATE SUBJECT)])')
-        if 'OK' != typ:
-          raise SkipFolderException("FETCH %s failed: %s" % (num, data))
-        header = data[0][1].strip()
-        header = header.replace('\r\n','\t')
-        messages['<' + UUID + '.' + hashlib.sha1(header).hexdigest() + '>'] = num
-      spinner.spin()
+
+      data = parse_bulk_fetch(data)
+      data = [(d[0],d[1].strip()) for d in data]
+      
+      for num,header in data:
+        # remove newlines inside Message-Id (a dumb Exchange trait)
+        header = BLANKS_RE.sub(' ', header)
+        try:
+          msg_id = MSGID_RE.match(header).group(1) 
+          if msg_id not in messages.keys():
+            # avoid adding dupes
+            messages[msg_id] = num
+          # else:
+          #   print >>sys.stderr, 'DUPLICATE:', num, ' (of', messages[msg_id], ') id:', msg_id
+        except (IndexError, AttributeError):
+          # Some messages may have no Message-Id, so we'll synthesise one
+          # (this usually happens with Sent, Drafts and .Mac news)
+          typ, msg_data = server.fetch(num, '(BODY[HEADER.FIELDS (FROM TO CC DATE SUBJECT)])')
+          if 'OK' != typ:
+            raise SkipFolderException("FETCH %s failed: %s" % (num, msg_data))
+          header = msg_data[0][1].strip()
+          header = header.replace('\r\n','\t')
+          messages['<' + UUID + '.' + hashlib.sha1(header).hexdigest() + '>'] = num
+        spinner.spin()
+      base_num = num+1
   finally:
     spinner.stop()
     print ":",
