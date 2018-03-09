@@ -272,7 +272,7 @@ def scan_folder(server, foldername, nospinner, batch_size=HEADER_BATCH_SIZE):
     base_num = 1
     while base_num < num_msgs+1:
       # Retrieve Message-Id, making sure we don't mark all messages as read
-      typ, data = server.fetch('%d:%d' % (base_num, base_num+batch_size-1), '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
+      typ, data = server.fetch('%d:%d' % (base_num, min([num_msgs, base_num+batch_size-1])), '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
       if 'OK' != typ:
         raise SkipFolderException("FETCH %s failed: %s" % (num, data))
 
